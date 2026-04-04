@@ -1,6 +1,6 @@
 #!/usr/bin/python
 """
-EcoCaster - Lector RSS con Traducción Automática
+EcoCaster - Lector RSS con scraping y traducción automática para la terminal de GNU/Linux
 """
 
 import sys
@@ -12,9 +12,6 @@ import threading
 import queue
 import curses
 import re
-
-import re
-
 import requests
 from bs4 import BeautifulSoup
 
