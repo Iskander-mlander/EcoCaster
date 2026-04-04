@@ -503,7 +503,7 @@ class App:
             FROM articles a
             JOIN feeds f ON a.feed_id = f.id
             LEFT JOIN translations t ON t.article_id = a.id
-            ORDER BY a.feed_id, a.published DESC
+            ORDER BY f.id, a.published DESC
             LIMIT 200
         """)
         
@@ -523,8 +523,13 @@ class App:
                 continue
             seen_urls.add(url)
             
+            # Extract domain
             if url:
                 domain = urlparse(url).netloc.lower()
+                # Remove www. prefix
+                if domain.startswith('www.'):
+                    domain = domain[4:]
+                article['domain'] = domain
                 
                 is_blocked = False
                 for blocked in blacklist:
@@ -657,21 +662,29 @@ class App:
             start_idx = self.selected
             end_idx = min(start_idx + per_page, len(self.articles))
             
-            prev_feed = None
+            prev_domain = None
+            y = start_y
             for i in range(start_idx, end_idx):
                 a = self.articles[i]
-                y = start_y + (i - start_idx)
                 
                 if y >= h - 2:
                     break
                 
-                current_feed = a.get("feed_title", "")
-                if prev_feed and prev_feed != current_feed:
-                    self.stdscr.addstr(y, 0, "-" * (w - 1), curses.color_pair(5))
+                current_domain = a.get("domain", "")
+                
+                # Show domain above each section
+                if prev_domain is None or prev_domain != current_domain:
+                    if prev_domain is not None:
+                        # Blank line between sections
+                        y += 1
+                        if y >= h - 2:
+                            break
+                    # Domain header
+                    self.stdscr.addstr(y, 0, f"=== {current_domain[:w-6]} ===", curses.color_pair(3) | curses.A_BOLD)
                     y += 1
                     if y >= h - 2:
                         break
-                prev_feed = current_feed
+                prev_domain = current_domain
                 
                 title = a.get("translated_title") or a.get("title", "Sin título")
                 title = title[:w - 20]
@@ -683,6 +696,7 @@ class App:
                     self.stdscr.addstr(y, 0, f"→ [{is_processing}]  {title} {date}", curses.color_pair(2) | curses.A_BOLD)
                 else:
                     self.stdscr.addstr(y, 0, f"  [{is_processing}]  {title} {date}", curses.A_NORMAL)
+                y += 1
         else:
             self.stdscr.addstr(start_y, 0, " No hay articulos ", curses.color_pair(5))
     
