@@ -1,6 +1,6 @@
 #!/usr/bin/python
 """
-EcoCaster - Lector RSS con scraping y traducción automática para la terminal de GNU/Linux
+EcoCaster - Lector RSS con Traducción Automática
 """
 
 import sys
@@ -17,17 +17,15 @@ from bs4 import BeautifulSoup
 
 
 class ArticleScraper:
-    def __init__(self):
+    def __init__(self, custom_config=None):
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
+        self.config = custom_config or {}
     
-    def clean_article(self, soup):
-        article_content = []
-        
-        # Try selectors in order
-        selectors_to_try = [
+    def _get_default_selectors(self):
+        return [
             '.text',
             '.post-content',
             '.article-content',
@@ -38,11 +36,34 @@ class ArticleScraper:
             '.article-content',
             '.wysiwyg',
             'article',
-            '.post-content',
             '.entry-content',
             '[role="main"]',
             '.grid-main',
         ]
+    
+    def _get_default_unwanted_tags(self):
+        return ['script', 'style', 'nav', 'header', 'footer', 
+                'aside', 'iframe', 'noscript', 'form', 'button', 'a',
+                'menu', '.sidebar', '.advertisement', '.ad',
+                '.social-share', '.comments', '.related', '.video-player',
+                '.embed', '.share', '.menu', '.nav', '.footer', '.header',
+                '.video-wrapper', '.video-container', '.player',
+                'video', 'audio', 'source', '.news-feed', '.feed-item',
+                'link', 'ul', 'ol']
+    
+    def _get_default_skip_patterns(self):
+        return [
+            'listen', 'save', 'share', 'facebook', 'twitter', 'whatsapp',
+            'recommended', 'trending', 'most read', 'related', 
+            'advertisement', 'subscribe', 'newsletter', 'follow us',
+            'published on', 'by al jazeera', 'add al jazeera',
+            'click here', 'list of', 'end of list',
+        ]
+    
+    def clean_article(self, soup):
+        article_content = []
+        
+        selectors_to_try = self.config.get('selectors', None) or self._get_default_selectors()
         
         main_content = None
         for selector in selectors_to_try:
@@ -56,39 +77,35 @@ class ArticleScraper:
         if not main_content:
             main_content = soup
         
-        # Decompose unwanted tags
-        unwanted_tags = ['script', 'style', 'nav', 'header', 'footer', 
-                        'aside', 'iframe', 'noscript', 'form', 'button', 'a',
-                        'menu', '.sidebar', '.advertisement', '.ad',
-                        '.social-share', '.comments', '.related', '.video-player',
-                        '.embed', '.share', '.menu', '.nav', '.footer', '.header',
-                        '.video-wrapper', '.video-container', '.player',
-                        'video', 'audio', 'source', '.news-feed', '.feed-item',
-                        'link', 'ul', 'ol']
-
+        unwanted_tags = self.config.get('unwanted_tags', None) or self._get_default_unwanted_tags()
         for tag in unwanted_tags:
             for element in main_content.select(tag):
                 element.decompose()
         
         seen_texts = set()
         
-        # Only get text from specific elements that contain article content
-        target_elements = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote']
+        raw_mode = self.config.get('raw_text', False)
+        if raw_mode:
+            text = main_content.get_text(separator='\n', strip=True)
+            lines = [line.strip() for line in text.split('\n') if line.strip() and len(line.strip()) > 30]
+            for line in lines:
+                text_key = line[:40].lower()
+                if text_key not in seen_texts:
+                    article_content.append(line)
+                    seen_texts.add(text_key)
+            return '\n\n'.join(article_content)
+        
+        target_elements = self.config.get('target_elements', None) or ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote']
+        skip_patterns = self.config.get('skip_patterns', None) or self._get_default_skip_patterns()
+        min_text_length = self.config.get('min_text_length', 30)
+        
         for element in main_content.find_all(target_elements):
             text = element.get_text(strip=True)
             
-            if not text or len(text) < 30:
+            if not text or len(text) < min_text_length:
                 continue
             
             text_lower = text.lower()
-            
-            skip_patterns = [
-                'listen', 'save', 'share', 'facebook', 'twitter', 'whatsapp',
-                'recommended', 'trending', 'most read', 'related', 
-                'advertisement', 'subscribe', 'newsletter', 'follow us',
-                'published on', 'by al jazeera', 'add al jazeera',
-                'click here', 'list of', 'end of list',
-            ]
             
             if any(pattern in text_lower for pattern in skip_patterns):
                 continue
@@ -173,9 +190,15 @@ class Database:
                 last_modified TEXT,
                 active INTEGER DEFAULT 1,
                 last_fetched TEXT,
+                scraper_config TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        try:
+            cur.execute("SELECT scraper_config FROM feeds LIMIT 1")
+        except sqlite3.OperationalError:
+            cur.execute("ALTER TABLE feeds ADD COLUMN scraper_config TEXT")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS articles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,6 +278,21 @@ class Database:
         domain = domain.lower().strip()
         result = self.fetchone("SELECT id FROM blacklist WHERE domain = ?", (domain,))
         return result is not None
+    
+    def get_scraper_config(self, feed_id):
+        import json
+        result = self.fetchone("SELECT scraper_config FROM feeds WHERE id = ?", (feed_id,))
+        if result and result["scraper_config"]:
+            try:
+                return json.loads(result["scraper_config"])
+            except:
+                pass
+        return None
+    
+    def set_scraper_config(self, feed_id, config):
+        import json
+        config_json = json.dumps(config)
+        self.execute("UPDATE feeds SET scraper_config = ? WHERE id = ?", (config_json, feed_id))
     
     def close(self):
         self.conn.close()
@@ -900,7 +938,13 @@ class App:
         if 0 <= self.selected < len(self.articles):
             self.selected_article_id = self.articles[self.selected]["id"]
             
-            article = dict(self.db.fetchone("SELECT url, content, language, title FROM articles WHERE id = ?", (self.selected_article_id,)))
+            article = dict(self.db.fetchone("SELECT url, content, language, title, feed_id FROM articles WHERE id = ?", (self.selected_article_id,)))
+            
+            feed_id = article.get("feed_id")
+            scraper_config = None
+            if feed_id:
+                scraper_config = self.db.get_scraper_config(feed_id)
+            scraper = ArticleScraper(scraper_config)
             
             needs_scrape = False
             if article and article["url"]:
@@ -914,7 +958,7 @@ class App:
             if needs_scrape:
                 self.db.execute("UPDATE articles SET processing = 1 WHERE id = ?", (self.selected_article_id,))
                 
-                scraped = self.scraper.fetch_article(article["url"])
+                scraped = scraper.fetch_article(article["url"])
                 if scraped:
                     self.db.execute(
                         "UPDATE articles SET content = ?, processing = 0 WHERE id = ?",
@@ -933,9 +977,8 @@ class App:
             
             content_to_translate = article.get("content", "")
             
-            # If content is still short after scraping, try to get more
             if content_to_translate and len(content_to_translate) < 200:
-                more_content = self.scraper.fetch_article(article["url"])
+                more_content = scraper.fetch_article(article["url"])
                 if more_content and len(more_content) > len(content_to_translate):
                     content_to_translate = more_content
                     self.db.execute(
@@ -1117,9 +1160,14 @@ class App:
                 (self.selected_article_id,)
             )
             if not trans:
-                article = self.db.fetchone("SELECT url, content FROM articles WHERE id = ?", (self.selected_article_id,))
+                article = self.db.fetchone("SELECT url, content, feed_id FROM articles WHERE id = ?", (self.selected_article_id,))
                 if article and article["url"] and (not article["content"] or len(article.get("content", "")) < 50):
-                    scraped = self.scraper.fetch_article(article["url"])
+                    feed_id = article.get("feed_id")
+                    scraper_config = None
+                    if feed_id:
+                        scraper_config = self.db.get_scraper_config(feed_id)
+                    scraper = ArticleScraper(scraper_config)
+                    scraped = scraper.fetch_article(article["url"])
                     if scraped:
                         self.db.execute(
                             "UPDATE articles SET content = ? WHERE id = ?",
@@ -1152,7 +1200,32 @@ def main():
     parser = argparse.ArgumentParser(description="EcoCaster - Lector RSS")
     parser.add_argument("-a", "--add", metavar="URL", help="Añadir feed")
     parser.add_argument("-r", "--refresh", action="store_true", help="Actualizar")
+    parser.add_argument("-c", "--config", metavar="CONFIG", help="Configuración de scraper (JSON) para el feed")
+    parser.add_argument("--list-feeds", action="store_true", help="Listar todos los feeds con sus IDs")
+    parser.add_argument("--set-config", metavar="ID:CONFIG", help="Establecer config de scraper (JSON) para un feed por ID")
     args = parser.parse_args()
+    
+    db = Database()
+    
+    if args.list_feeds:
+        feeds = db.fetchall("SELECT id, title, url FROM feeds ORDER BY id")
+        for f in feeds:
+            print(f"{f['id']:3d} - {f['title']}")
+        db.close()
+        return
+    
+    if args.set_config:
+        try:
+            feed_id_str, config_json = args.set_config.split(':', 1)
+            feed_id = int(feed_id_str)
+            import json
+            config = json.loads(config_json)
+            db.set_scraper_config(feed_id, config)
+            print(f"✓ Config aplicada al feed {feed_id}")
+        except Exception as e:
+            print(f"✗ Error: {e}")
+        db.close()
+        return
     
     if args.add:
         db = Database()
